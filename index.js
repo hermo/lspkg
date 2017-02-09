@@ -3,18 +3,30 @@
 const glob = require('glob')
 const semver = require('semver')
 const cliWidth = require('cli-width')
-const path = require('path')
 const voca = require('voca')
 const chalk = require('chalk')
+const Promise = require('bluebird')
+const Gauge = require('gauge')
 
-const base = path.join(process.cwd())
+const gauge = new Gauge({ updateInterval: 50 })
 const cliW = cliWidth()
 
-const hasRelevantData = pkg => ['name', 'version', 'description'].reduce((acc, key) => acc && pkg.hasOwnProperty(key), true)
+const hasRelevantData = pkg => ['name', 'version', 'description'].every(pkg.hasOwnProperty.bind(pkg))
+const readFile = Promise.promisify(require('fs').readFile)
+
+const parentRe = /.+\/(.+)\/package.json/
+const getPackageParent = path => {
+  const match = path.match(parentRe)
+  return match ? match[1] : path
+}
+
+const loadPackage = file => readFile(file)
+  .then(JSON.parse)
+  .catch(() => ({}))
 
 function processPackages (files) {
-  const pkgs = files
-        .map(require)
+  gauge.show('parsing', 0.9)
+  const pkgsP = Promise.map(files, loadPackage)
         .filter(hasRelevantData)
         .reduce((acc, pkg) => {
           const existing = acc.get(pkg.name)
@@ -22,35 +34,51 @@ function processPackages (files) {
           return acc.set(pkg.name, pkg)
         }, new Map())
 
-  const maxNameLen = [...pkgs.keys()].reduce((max, key, n) => key && key.length > max ? key.length : max, 0)
+  pkgsP.then(pkgs => {
+    const maxNameLen = [...pkgs.keys()].reduce((max, key, n) => key && key.length > max ? key.length : max, 0)
 
-  const fmtEntry = (name, descr = 'No description') => {
-    const spacer = '  '
-    const namePad = ' '.repeat(maxNameLen - name.length)
-    let out = chalk.bold(name) + namePad + spacer
+    const fmtEntry = (name, descr = 'No description') => {
+      const spacer = '  '
+      const namePad = ' '.repeat(maxNameLen - name.length)
+      let out = chalk.bold(name) + namePad + spacer
 
-    const maxDescrW = cliW - maxNameLen - spacer.length
-    const descrPad = ' '.repeat(maxNameLen + spacer.length)
+      const maxDescrW = cliW - maxNameLen - spacer.length
+      const descrPad = ' '.repeat(maxNameLen + spacer.length)
 
-    out += voca.wordWrap(descr, {
-      width: maxDescrW,
-      indent: descrPad,
-      cut: true
-    }).trimLeft()
+      out += voca.wordWrap(descr, {
+        width: maxDescrW,
+        indent: descrPad,
+        cut: true
+      }).trimLeft()
 
-    return out
-  }
+      return out
+    }
 
-  [...pkgs].forEach(([name, pkg], n) => {
-    const row = fmtEntry(name, pkg.description)
-    console.log(n % 2 === 0 ? chalk.yellow(row) : row)
+    [...pkgs].forEach(([name, pkg], n) => {
+      const row = fmtEntry(name, pkg.description)
+      console.log(n % 2 === 0 ? chalk.yellow(row) : row)
+    })
   })
 }
 
-glob(base + '/**/package.json', (err, files) => {
+let progress = 0
+const incr = 1 / 1000
+
+glob('**/package.json', {
+  nodir: true,
+  nosort: true,
+  nobrace: true,
+  noext: true
+}, (err, files) => {
   if (err) {
     console.error(err)
     process.exit(1)
   }
   processPackages(files)
+}).on('match', file => {
+  gauge.show({
+    section: 'globbing',
+    subsection: getPackageParent(file),
+    completed: progress += incr
+  })
 })
